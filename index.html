@@ -1,0 +1,1336 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Block Breaker</title>
+
+<style>
+* {
+    box-sizing: border-box;
+}
+
+html, body {
+    margin: 0;
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+    background: #000;
+    color: #fff;
+    font-family: Arial, sans-serif;
+}
+
+body {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+}
+
+#gameWrap {
+    position: relative;
+    width: min(900px, 100vw);
+    height: min(700px, 100vh);
+}
+
+canvas {
+    display: block;
+    width: 100%;
+    height: 100%;
+    background: #000;
+}
+
+#hud {
+    position: absolute;
+    top: 12px;
+    left: 18px;
+    right: 18px;
+    display: flex;
+    justify-content: space-between;
+    pointer-events: none;
+    font-size: 15px;
+    color: #ddd;
+}
+
+#message {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    flex-direction: column;
+    background: rgba(0, 0, 0, .72);
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity .2s;
+}
+
+#message.show {
+    opacity: 1;
+    pointer-events: auto;
+}
+
+#message h1 {
+    margin: 0 0 12px;
+    font-size: 34px;
+}
+
+#message p {
+    margin: 5px;
+    color: #aaa;
+}
+
+button {
+    margin-top: 18px;
+    padding: 10px 24px;
+    border: 1px solid #555;
+    background: #111;
+    color: #fff;
+    cursor: pointer;
+    border-radius: 5px;
+}
+
+button:hover {
+    background: #222;
+}
+
+#effects {
+    position: absolute;
+    left: 18px;
+    bottom: 15px;
+    display: flex;
+    gap: 8px;
+    pointer-events: none;
+}
+
+.effect {
+    min-width: 34px;
+    height: 34px;
+    padding: 0 7px;
+    border: 1px solid #555;
+    border-radius: 7px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 15px;
+    background: #111;
+}
+
+.effect span {
+    margin-left: 4px;
+    font-size: 11px;
+    color: #aaa;
+}
+</style>
+</head>
+
+<body>
+
+<div id="gameWrap">
+
+    <canvas id="game"></canvas>
+
+    <div id="hud">
+        <div>
+            SCORE <span id="score">0</span>
+        </div>
+
+        <div>
+            STAGE <span id="stage">1</span>
+        </div>
+    </div>
+
+    <div id="effects"></div>
+
+    <div id="message">
+        <h1 id="messageTitle">GAME OVER</h1>
+        <p id="messageText"></p>
+        <button id="restart">もう一度</button>
+    </div>
+
+</div>
+
+<script>
+"use strict";
+
+const canvas = document.getElementById("game");
+const ctx = canvas.getContext("2d");
+
+const scoreEl = document.getElementById("score");
+const stageEl = document.getElementById("stage");
+const effectsEl = document.getElementById("effects");
+
+const message = document.getElementById("message");
+const messageTitle = document.getElementById("messageTitle");
+const messageText = document.getElementById("messageText");
+const restartButton = document.getElementById("restart");
+
+let W = 900;
+let H = 700;
+
+function resizeCanvas() {
+    const rect = canvas.getBoundingClientRect();
+
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+
+    canvas.width = rect.width * dpr;
+    canvas.height = rect.height * dpr;
+
+    ctx.setTransform(
+        canvas.width / W,
+        0,
+        0,
+        canvas.height / H,
+        0,
+        0
+    );
+}
+
+window.addEventListener("resize", resizeCanvas);
+
+const game = {
+    running: true,
+    paused: false,
+
+    score: 0,
+    stage: 1,
+
+    paddle: {
+        x: W / 2 - 65,
+        y: H - 45,
+        width: 130,
+        baseWidth: 130,
+        height: 12,
+
+        normalSpeed: 8,
+        slowSpeed: 4,
+
+        speed: 8,
+
+        left: false,
+        right: false,
+
+        slowUntil: 0,
+        wideUntil: 0
+    },
+
+    balls: [],
+
+    blocks: [],
+
+    items: [],
+
+    keys: {},
+
+    lastTime: performance.now(),
+
+    nextStageTimer: 0
+};
+
+const BLOCK = {
+    width: 70,
+    height: 22,
+    gap: 7,
+
+    top: 65,
+    left: 45
+};
+
+const ITEM_TYPES = {
+    SLOW: {
+        symbol: "↓",
+        duration: 15000
+    },
+
+    WIDE: {
+        symbol: "↔",
+        duration: 15000
+    },
+
+    MULTI: {
+        symbol: "+",
+        duration: 0
+    },
+
+    SPEED: {
+        symbol: "◀▶",
+        duration: 15000
+    }
+};
+
+function random(min, max) {
+    return Math.random() * (max - min) + min;
+}
+
+function clamp(value, min, max) {
+    return Math.max(min, Math.min(max, value));
+}
+
+/* =========================
+   BALL
+========================= */
+
+function createBall(x, y, angle, speed = 5) {
+    return {
+        x,
+        y,
+
+        radius: 7,
+
+        vx: Math.cos(angle) * speed,
+        vy: Math.sin(angle) * speed,
+
+        baseSpeed: speed,
+
+        alive: true,
+
+        speedEffect: false
+    };
+}
+
+function resetBall() {
+    game.balls = [
+        createBall(
+            W / 2,
+            H - 80,
+            random(-2.6, -0.5),
+            5 + game.stage * 0.35
+        )
+    ];
+}
+
+/* =========================
+   BLOCKS
+========================= */
+
+function createStage() {
+    game.blocks = [];
+
+    const rows = Math.min(4 + game.stage, 10);
+
+    const cols = Math.min(
+        8 + Math.floor(game.stage / 2),
+        11
+    );
+
+    const totalWidth =
+        cols * BLOCK.width +
+        (cols - 1) * BLOCK.gap;
+
+    const startX =
+        (W - totalWidth) / 2;
+
+    for (let row = 0; row < rows; row++) {
+
+        for (let col = 0; col < cols; col++) {
+
+            const hp =
+                game.stage >= 5 &&
+                Math.random() < 0.2
+                    ? 2
+                    : 1;
+
+            game.blocks.push({
+                x: startX +
+                    col * (BLOCK.width + BLOCK.gap),
+
+                y: BLOCK.top +
+                    row * (BLOCK.height + BLOCK.gap),
+
+                width: BLOCK.width,
+                height: BLOCK.height,
+
+                hp,
+                maxHp: hp,
+
+                alive: true
+            });
+        }
+    }
+}
+
+/* =========================
+   ITEMS
+========================= */
+
+function spawnItem(x, y) {
+
+    // ステージが上がるほど少しだけ出やすくする
+    const chance =
+        Math.min(
+            0.13 + game.stage * 0.01,
+            0.22
+        );
+
+    if (Math.random() > chance) {
+        return;
+    }
+
+    const types = Object.keys(ITEM_TYPES);
+
+    const type =
+        types[Math.floor(Math.random() * types.length)];
+
+    game.items.push({
+        x,
+        y,
+
+        width: 30,
+        height: 30,
+
+        vy: 2.3,
+
+        type,
+
+        hue: random(0, 360)
+    });
+}
+
+/* =========================
+   EFFECTS
+========================= */
+
+function hasEffect(name) {
+    const now = performance.now();
+
+    if (name === "SLOW") {
+        return game.paddle.slowUntil > now;
+    }
+
+    if (name === "WIDE") {
+        return game.paddle.wideUntil > now;
+    }
+
+    return false;
+}
+
+function applyItem(type) {
+
+    const now = performance.now();
+
+    if (type === "SLOW") {
+        game.paddle.slowUntil =
+            now + ITEM_TYPES.SLOW.duration;
+    }
+
+    else if (type === "WIDE") {
+        game.paddle.wideUntil =
+            now + ITEM_TYPES.WIDE.duration;
+    }
+
+    else if (type === "MULTI") {
+        addBalls();
+    }
+
+    else if (type === "SPEED") {
+
+        // 15秒間、往復時の速度差を有効化
+        for (const ball of game.balls) {
+            ball.speedEffect = true;
+        }
+
+        setTimeout(() => {
+            for (const ball of game.balls) {
+                ball.speedEffect = false;
+            }
+        }, ITEM_TYPES.SPEED.duration);
+    }
+}
+
+function addBalls() {
+
+    const original =
+        game.balls.find(ball => ball.alive);
+
+    if (!original) {
+        return;
+    }
+
+    const speed =
+        Math.sqrt(
+            original.vx ** 2 +
+            original.vy ** 2
+        );
+
+    const baseAngle =
+        Math.atan2(
+            original.vy,
+            original.vx
+        );
+
+    // 最大5個まで
+    const amount =
+        Math.min(
+            2,
+            5 - game.balls.length
+        );
+
+    for (let i = 0; i < amount; i++) {
+
+        const angle =
+            baseAngle +
+            random(-0.8, 0.8);
+
+        game.balls.push(
+            createBall(
+                original.x,
+                original.y,
+                angle,
+                speed
+            )
+        );
+    }
+}
+
+/* =========================
+   COLLISION
+========================= */
+
+function circleRectCollision(ball, rect) {
+
+    const closestX =
+        clamp(
+            ball.x,
+            rect.x,
+            rect.x + rect.width
+        );
+
+    const closestY =
+        clamp(
+            ball.y,
+            rect.y,
+            rect.y + rect.height
+        );
+
+    const dx = ball.x - closestX;
+    const dy = ball.y - closestY;
+
+    return (
+        dx * dx +
+        dy * dy
+    ) < ball.radius * ball.radius;
+}
+
+/* =========================
+   BALL UPDATE
+========================= */
+
+function updateBall(ball, dt) {
+
+    if (!ball.alive) {
+        return;
+    }
+
+    let speedMultiplier = 1;
+
+    if (ball.speedEffect) {
+
+        // 下方向＝パドルへ戻るときは遅く
+        // 上方向＝ブロックへ向かうときは速く
+        speedMultiplier =
+            ball.vy > 0
+                ? 0.55
+                : 1.35;
+    }
+
+    ball.x +=
+        ball.vx *
+        speedMultiplier *
+        dt;
+
+    ball.y +=
+        ball.vy *
+        speedMultiplier *
+        dt;
+
+    /* 壁 */
+
+    if (ball.x - ball.radius <= 0) {
+        ball.x = ball.radius;
+        ball.vx = Math.abs(ball.vx);
+    }
+
+    if (ball.x + ball.radius >= W) {
+        ball.x = W - ball.radius;
+        ball.vx = -Math.abs(ball.vx);
+    }
+
+    if (ball.y - ball.radius <= 0) {
+        ball.y = ball.radius;
+        ball.vy = Math.abs(ball.vy);
+    }
+
+    /* パドル */
+
+    const paddle = game.paddle;
+
+    if (
+        ball.vy > 0 &&
+        circleRectCollision(ball, paddle)
+    ) {
+
+        ball.y =
+            paddle.y -
+            ball.radius;
+
+        const hit =
+            (ball.x -
+                (paddle.x + paddle.width / 2))
+            /
+            (paddle.width / 2);
+
+        const angle =
+            hit * 1.15;
+
+        const speed =
+            Math.max(
+                5,
+                Math.sqrt(
+                    ball.vx ** 2 +
+                    ball.vy ** 2
+                ) * 1.02
+            );
+
+        ball.vx =
+            Math.sin(angle) * speed;
+
+        ball.vy =
+            -Math.cos(angle) * speed;
+    }
+
+    /* ブロック */
+
+    for (const block of game.blocks) {
+
+        if (!block.alive) {
+            continue;
+        }
+
+        if (
+            circleRectCollision(
+                ball,
+                block
+            )
+        ) {
+
+            block.hp--;
+
+            if (block.hp <= 0) {
+
+                block.alive = false;
+
+                game.score += 10;
+
+                spawnItem(
+                    block.x +
+                    block.width / 2,
+
+                    block.y +
+                    block.height / 2
+                );
+            }
+
+            else {
+                game.score += 5;
+            }
+
+            // 簡易反射
+            const overlapLeft =
+                ball.x +
+                ball.radius -
+                block.x;
+
+            const overlapRight =
+                block.x +
+                block.width -
+                (ball.x -
+                    ball.radius);
+
+            const overlapTop =
+                ball.y +
+                ball.radius -
+                block.y;
+
+            const overlapBottom =
+                block.y +
+                block.height -
+                (ball.y -
+                    ball.radius);
+
+            const minX =
+                Math.min(
+                    overlapLeft,
+                    overlapRight
+                );
+
+            const minY =
+                Math.min(
+                    overlapTop,
+                    overlapBottom
+                );
+
+            if (minX < minY) {
+                ball.vx *= -1;
+            }
+            else {
+                ball.vy *= -1;
+            }
+
+            break;
+        }
+    }
+
+    /* 画面下 */
+
+    if (ball.y - ball.radius > H) {
+        ball.alive = false;
+    }
+}
+
+/* =========================
+   ITEM UPDATE
+========================= */
+
+function updateItems(dt) {
+
+    for (let i = game.items.length - 1; i >= 0; i--) {
+
+        const item = game.items[i];
+
+        item.y += item.vy * dt;
+
+        item.hue =
+            (item.hue + 0.8 * dt) % 360;
+
+        // パドル取得
+        if (
+            item.x + item.width / 2 >=
+                game.paddle.x &&
+
+            item.x - item.width / 2 <=
+                game.paddle.x +
+                game.paddle.width &&
+
+            item.y + item.height / 2 >=
+                game.paddle.y &&
+
+            item.y -
+                item.height / 2 <=
+                game.paddle.y +
+                game.paddle.height
+        ) {
+
+            applyItem(item.type);
+
+            game.items.splice(i, 1);
+
+            continue;
+        }
+
+        // 画面外
+        if (
+            item.y -
+            item.height / 2 >
+            H
+        ) {
+            // 取り逃しても何も起きない
+            game.items.splice(i, 1);
+        }
+    }
+}
+
+/* =========================
+   PADDLE
+========================= */
+
+function updatePaddle(dt) {
+
+    const paddle = game.paddle;
+
+    const now = performance.now();
+
+    paddle.speed =
+        paddle.slowUntil > now
+            ? paddle.slowSpeed
+            : paddle.normalSpeed;
+
+    const targetWidth =
+        paddle.wideUntil > now
+            ? paddle.baseWidth * 1.7
+            : paddle.baseWidth;
+
+    paddle.width +=
+        (targetWidth - paddle.width)
+        * 0.15;
+
+    if (paddle.left) {
+        paddle.x -= paddle.speed * dt;
+    }
+
+    if (paddle.right) {
+        paddle.x += paddle.speed * dt;
+    }
+
+    paddle.x =
+        clamp(
+            paddle.x,
+            0,
+            W - paddle.width
+        );
+}
+
+/* =========================
+   STAGE
+========================= */
+
+function checkStageClear() {
+
+    if (
+        game.blocks.some(
+            block => block.alive
+        )
+    ) {
+        return;
+    }
+
+    game.stage++;
+
+    game.paddle.baseWidth =
+        Math.max(
+            75,
+            130 -
+            (game.stage - 1) * 6
+        );
+
+    createStage();
+
+    resetBall();
+}
+
+/* =========================
+   GAME OVER
+========================= */
+
+function checkGameOver() {
+
+    if (
+        game.balls.some(
+            ball => ball.alive
+        )
+    ) {
+        return;
+    }
+
+    game.running = false;
+
+    messageTitle.textContent =
+        "GAME OVER";
+
+    messageText.textContent =
+        `SCORE ${game.score} / STAGE ${game.stage}`;
+
+    message.classList.add("show");
+}
+
+/* =========================
+   HUD
+========================= */
+
+function updateHUD() {
+
+    scoreEl.textContent =
+        game.score;
+
+    stageEl.textContent =
+        game.stage;
+
+    effectsEl.innerHTML = "";
+
+    const now =
+        performance.now();
+
+    const effects = [
+        ["SLOW", "↓"],
+        ["WIDE", "↔"],
+        ["SPEED", "◀▶"]
+    ];
+
+    for (const [name, symbol] of effects) {
+
+        let until = 0;
+
+        if (name === "SLOW") {
+            until =
+                game.paddle.slowUntil;
+        }
+
+        else if (name === "WIDE") {
+            until =
+                game.paddle.wideUntil;
+        }
+
+        if (until > now) {
+
+            const div =
+                document.createElement("div");
+
+            div.className = "effect";
+
+            div.textContent =
+                symbol;
+
+            const span =
+                document.createElement("span");
+
+            span.textContent =
+                Math.ceil(
+                    (until - now) / 1000
+                ) + "s";
+
+            div.appendChild(span);
+
+            effectsEl.appendChild(div);
+        }
+    }
+}
+
+/* =========================
+   DRAW
+========================= */
+
+function draw() {
+
+    ctx.clearRect(
+        0,
+        0,
+        W,
+        H
+    );
+
+    /* ブロック */
+
+    for (const block of game.blocks) {
+
+        if (!block.alive) {
+            continue;
+        }
+
+        const ratio =
+            block.hp /
+            block.maxHp;
+
+        ctx.fillStyle =
+            `hsl(${200 + ratio * 80}, 60%, ${35 + ratio * 20}%)`;
+
+        ctx.fillRect(
+            block.x,
+            block.y,
+            block.width,
+            block.height
+        );
+    }
+
+    /* アイテム */
+
+    for (const item of game.items) {
+
+        const type =
+            ITEM_TYPES[item.type];
+
+        ctx.save();
+
+        ctx.translate(
+            item.x,
+            item.y
+        );
+
+        ctx.fillStyle =
+            `hsl(${item.hue}, 80%, 55%)`;
+
+        ctx.beginPath();
+
+        ctx.roundRect(
+            -item.width / 2,
+            -item.height / 2,
+            item.width,
+            item.height,
+            7
+        );
+
+        ctx.fill();
+
+        ctx.fillStyle =
+            "#000";
+
+        ctx.font =
+            item.type === "SPEED"
+                ? "12px Arial"
+                : "19px Arial";
+
+        ctx.textAlign =
+            "center";
+
+        ctx.textBaseline =
+            "middle";
+
+        ctx.fillText(
+            type.symbol,
+            0,
+            1
+        );
+
+        ctx.restore();
+    }
+
+    /* パドル */
+
+    const paddle =
+        game.paddle;
+
+    ctx.fillStyle =
+        "#fff";
+
+    ctx.fillRect(
+        paddle.x,
+        paddle.y,
+        paddle.width,
+        paddle.height
+    );
+
+    /* ボール */
+
+    for (const ball of game.balls) {
+
+        if (!ball.alive) {
+            continue;
+        }
+
+        ctx.beginPath();
+
+        ctx.arc(
+            ball.x,
+            ball.y,
+            ball.radius,
+            0,
+            Math.PI * 2
+        );
+
+        ctx.fillStyle =
+            "#fff";
+
+        ctx.fill();
+    }
+}
+
+/* =========================
+   GAME LOOP
+========================= */
+
+function loop(time) {
+
+    const delta =
+        Math.min(
+            (time -
+                game.lastTime) /
+                16.666,
+            2
+        );
+
+    game.lastTime =
+        time;
+
+    if (game.running) {
+
+        updatePaddle(delta);
+
+        for (const ball of game.balls) {
+            updateBall(
+                ball,
+                delta
+            );
+        }
+
+        updateItems(delta);
+
+        checkStageClear();
+
+        checkGameOver();
+
+        updateHUD();
+    }
+
+    draw();
+
+    requestAnimationFrame(loop);
+}
+/* =========================
+   KEYBOARD
+========================= */
+
+window.addEventListener(
+    "keydown",
+    e => {
+
+        game.keys[e.key] = true;
+
+        // F = 左
+        if (e.key === "f" || e.key === "F") {
+            game.paddle.left = true;
+        }
+
+        // J = 右
+        if (e.key === "j" || e.key === "J") {
+            game.paddle.right = true;
+        }
+
+        // Esc = セーブ
+        if (e.key === "Escape") {
+            saveGame();
+        }
+    }
+);
+
+window.addEventListener(
+    "keyup",
+    e => {
+
+        game.keys[e.key] = false;
+
+        if (e.key === "f" || e.key === "F") {
+            game.paddle.left = false;
+        }
+
+        if (e.key === "j" || e.key === "J") {
+            game.paddle.right = false;
+        }
+    }
+);
+/* =========================
+   TOUCH / MOUSE
+========================= */
+
+let pointerActive = false;
+
+canvas.addEventListener(
+    "pointermove",
+    e => {
+
+        const rect =
+            canvas.getBoundingClientRect();
+
+        const x =
+            (e.clientX - rect.left)
+            / rect.width
+            * W;
+
+        game.paddle.x =
+            clamp(
+                x -
+                game.paddle.width / 2,
+                0,
+                W -
+                game.paddle.width
+            );
+    }
+);
+
+canvas.addEventListener(
+    "pointerdown",
+    () => {
+        pointerActive = true;
+    }
+);
+
+canvas.addEventListener(
+    "pointerup",
+    () => {
+        pointerActive = false;
+    }
+);
+
+/* =========================
+   SAVE / LOAD
+========================= */
+
+function saveGame() {
+
+    const data = {
+
+        score: game.score,
+
+        stage: game.stage,
+
+        paddle: {
+            x: game.paddle.x,
+            baseWidth:
+                game.paddle.baseWidth,
+            slowUntil:
+                game.paddle.slowUntil,
+            wideUntil:
+                game.paddle.wideUntil
+        },
+
+        balls:
+            game.balls
+                .filter(
+                    ball =>
+                        ball.alive
+                )
+                .map(ball => ({
+                    x: ball.x,
+                    y: ball.y,
+                    vx: ball.vx,
+                    vy: ball.vy,
+                    radius: ball.radius,
+                    alive: true,
+                    speedEffect:
+                        ball.speedEffect
+                })),
+
+        blocks:
+            game.blocks
+                .filter(
+                    block =>
+                        block.alive
+                ),
+
+        items:
+            game.items,
+
+        savedAt:
+            Date.now()
+    };
+
+    localStorage.setItem(
+        "blockBreakerSave",
+        JSON.stringify(data)
+    );
+}
+
+function loadGame() {
+
+    const raw =
+        localStorage.getItem(
+            "blockBreakerSave"
+        );
+
+    if (!raw) {
+        return false;
+    }
+
+    try {
+
+        const data =
+            JSON.parse(raw);
+
+        game.score =
+            data.score || 0;
+
+        game.stage =
+            data.stage || 1;
+
+        game.paddle.x =
+            data.paddle?.x ??
+            game.paddle.x;
+
+        game.paddle.baseWidth =
+            data.paddle?.baseWidth ??
+            game.paddle.baseWidth;
+
+        game.paddle.slowUntil =
+            data.paddle?.slowUntil || 0;
+
+        game.paddle.wideUntil =
+            data.paddle?.wideUntil || 0;
+
+        game.balls =
+            Array.isArray(data.balls)
+                ? data.balls
+                : [];
+
+        createStage();
+
+        // 保存時点のブロック状態を復元
+        if (
+            Array.isArray(data.blocks)
+        ) {
+
+            for (const saved of data.blocks) {
+
+                const block =
+                    game.blocks.find(
+                        b =>
+                            Math.abs(
+                                b.x -
+                                saved.x
+                            ) < 1 &&
+                            Math.abs(
+                                b.y -
+                                saved.y
+                            ) < 1
+                    );
+
+                if (!block) {
+                    continue;
+                }
+
+                block.hp =
+                    saved.hp;
+
+                block.maxHp =
+                    saved.maxHp;
+
+                block.alive =
+                    saved.alive;
+            }
+        }
+
+        game.items =
+            Array.isArray(data.items)
+                ? data.items
+                : [];
+
+        return game.balls.length > 0;
+
+    } catch (e) {
+
+        console.error(
+            "Save load failed:",
+            e
+        );
+
+        return false;
+    }
+}
+
+/* =========================
+   RESTART
+========================= */
+
+restartButton.addEventListener(
+    "click",
+    () => {
+
+        localStorage.removeItem(
+            "blockBreakerSave"
+        );
+
+        location.reload();
+    }
+);
+
+/* =========================
+   START
+========================= */
+
+if (!loadGame()) {
+
+    createStage();
+
+    resetBall();
+}
+
+resizeCanvas();
+
+requestAnimationFrame(
+    loop
+);
